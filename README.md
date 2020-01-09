@@ -1,44 +1,138 @@
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+# magic-selectors
 
-## Available Scripts
+Like `useEffect` but for selectors.
 
-In the project directory, you can run:
+Under construction…
 
-### `npm start`
+## Why?
 
-Runs the app in the development mode.<br>
-Open [http://localhost:3000](http://localhost:3000) to view it in the browser.
+### Problem
 
-The page will reload if you make edits.<br>
-You will also see any lint errors in the console.
+In an early stage of development of an application,
+we might not want to deal with data loading.
+We might decide to pre-load some data into the store **before** starting the application.
 
-### `npm test`
+```js
+function Application(props) {
+  const [dataLoaded, setDataLoaded] = useState(false)
+  const dispatch = useDispatch()
 
-Launches the test runner in the interactive watch mode.<br>
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+  useEffect(() => {
+    dispatch(loadInitialData())
+      .then(() => setDataLoaded(true))
+      .catch(handleCatastrophicError)
+  }, [dispatch])
 
-### `npm run build`
+  if (!dataLoaded) {
+    return <LoadingScreen />
+  }
 
-Builds the app for production to the `build` folder.<br>
-It correctly bundles React in production mode and optimizes the build for the best performance.
+  return <Layout>{/* ... */}</Layout>
+}
 
-The build is minified and the filenames include the hashes.<br>
-Your app is ready to be deployed!
+function loadInitialData() {
+  return async dispatch => {
+    await Promise.all([
+      dispatch(loadAllUsers()),
+      dispatch(loadAllProjects()),
+      dispatch(loadAllTags()),
+      dispatch(loadSubscriptionInfo())
+    ])
+  }
+}
+```
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+and the component that renders the user name simply select the data from the store.
 
-### `npm run eject`
+```js
+function UserCard(props) {
+  const user = useSelector(selectUserState(props.userId))
+  //                       ^ selects a user or returns a default "unknown user" object
+  return <Card title={user.name}>{/* ... */}</Card>
+}
+```
 
-**Note: this is a one-way operation. Once you `eject`, you can’t go back!**
+Over time, the app grows and there is more data to load.
+Once 10kb, some long-time users have to wait for 200kb of data to load.
+And we realized that not all data that we load beforehand are actually needed on first render.
+For example, in the home page, we might not need the tags.
 
-If you aren’t satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+In modern React apps,
+we select data from store with `useSelector` and fetch data with `useEffect` when we need to load it:
 
-Instead, it will copy all the configuration files and the transitive dependencies (Webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you’re on your own.
+```js
+function ProjectPage(props) {
+  const { projectId } = props
 
-You don’t have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn’t feel obligated to use this feature. However we understand that this tool wouldn’t be useful if you couldn’t customize it when you are ready for it.
+  const dispatch = useDispatch()
 
-## Learn More
+  useEffect(() => {
+    dispatch(fetchProjectDataIfNeeded(projectId))
+  }, [projectId, dispatch])
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+  const projectData = useSelector(selectProjectData(projectId))
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+  return /* ... */
+}
+```
+
+This ensures that if the data doesn’t already exist for something we try to display, it will be fetched and eventually displayed.
+
+But what if **hundreds** of components selected the data from the store, assuming that the data is already there (or at least, being loaded).
+
+- We could go ahead and add `useEffect` to all those 100+ components.
+
+  - But some components are still using classes or higher-order components, so they can’t use `useEffect`. Some of them will get `componentDidMount` instead.
+  - So, this will be a big sweeping change... But didn’t we use selectors to abstract our component away from the implementation detail of which part of the store the data came from?
+  - Failure to add the effect in a component may mean that the component may be stuck at displaying the loading screen.
+
+- We could stop using selectors directly and start using React hooks instead.
+
+  - This looks interesting because hooks can also trigger effects, such as loading.
+  - Again, 100+ components must be refactored to use hooks. This is a breaking change.
+  - Some selectors are composed of other selectors. For example, `selectParticipants` might depend on `selectTask` + `selectUser`.
+    That means to properly implement lazy loading, we need to convert all selectors into React hooks.
+
+- Add some magic to `useSelector` (and react-redux’s `connect`) to allow selectors to fetch data on component’s behalf.
+
+  - Think about it… selecting data from store and fetching data from API is deeply linked.
+    It doesn’t make much sense to select data from the store without someone putting data into it, right?
+    Shouldn’t the act of selecting something from the store signify that the data where we’re selecting needs to be fetched?
+  - We modify the notion of selector (which originally means selecting some data from the store)
+    to mean selecting some data from _wherever it needs to come from_.
+    The selector thus is then responsible for making sure the data is in (or eventually will be in) the store.
+  - By doing this, the data selection API stays the same (no breaking changes).
+
+### Sketch of the solution
+
+This component will look the same:
+
+```js
+function UserCard(props) {
+  const user = useSelector(selectUserState(props.userId))
+  return <Card title={user.name}>{/* ... */}</Card>
+}
+```
+
+However `selectUserState` will be able to register some effect:
+
+```js
+const selectUserState = id => state => {
+  useSelectorEffect(ensureUserIsFetched(id))
+  return state.users[id]
+}
+
+const ensureUserIsFetched = makeParameterizedSelectorEffect(
+  // Name, for debugging purposed.
+  'ensureUserIsFetched',
+  id => context => {
+    const { store } = context
+    // from here it is like useEffect
+    // note: non-ideal code
+    if (!store.getState().users[id]) store.dispatch(fetchUser(id))
+    return () => {}
+  }
+)
+```
+
+Instead of calling stock `useSelector`, we wrap the `useSelector` API which can keep track of active effects.
