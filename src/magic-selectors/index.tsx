@@ -1,237 +1,161 @@
-import { Selector, useSelector } from 'react-redux'
-import React, {
-  useCallback,
-  useRef,
-  useEffect,
+import {
   createContext,
+  Provider,
+  useCallback,
+  useEffect,
   useState,
-  ReactNode,
   useContext
 } from 'react'
 
-export const SubscriptionManagerContext = createContext<SubscriptionManager | null>(
-  null
-)
+import { Selector, useSelector } from 'react-redux'
 
-let _currentCollector: SubscriptionCollector | null = null
+type Effect<T = unknown> = (context: T) => undefined | (() => void)
 
-class SubscriptionCollector {
-  private collectedSubscriptionIntents = new Map<string, SubscriptionIntent>()
-  collect(type: SubscriptionType, key: string) {
-    const intent = new SubscriptionIntent(type, key)
-    const mapKey = intent.toMapKey()
-    if (!this.collectedSubscriptionIntents.has(mapKey)) {
-      this.collectedSubscriptionIntents.set(
-        mapKey,
-        new SubscriptionIntent(type, key)
-      )
-    }
-  }
-  beginCollecting() {
-    _currentCollector = this
-  }
-  endCollecting() {
-    _currentCollector = null
-  }
-  getIntentMap() {
-    return this.collectedSubscriptionIntents
-  }
+type SelectorEffectContext<T> = {
+  Provider: Provider<T>
+  createCollector: () => SelectorEffectCollector<T>
+  useSelectorEffect: (effect: Effect<T>) => void
+  useMagicSelector: <State, TProps>(selector: Selector<State, TProps>) => TProps
+  makeNamedSelectorEffect: (name: string, effect: Effect<T>) => Effect<T>
+  makeParameterizedSelectorEffect: <P extends (string | number)[]>(
+    name: string,
+    createEffect: (...args: P) => Effect<T>
+  ) => (...args: P) => Effect<T>
 }
 
-export class SubscriptionType<Context = any> {
-  constructor(
-    public name: string,
-    public effect: (key: string, context: Context) => () => void
-  ) {}
-}
-
-class SubscriptionIntent {
-  private mapKey: string
-  constructor(
-    public readonly type: SubscriptionType,
-    public readonly key: string
-  ) {
-    this.mapKey = `${this.type}#${this.key}`
-  }
-  toString() {
-    return this.toMapKey()
-  }
-  toMapKey() {
-    return this.mapKey
-  }
-}
-
-export function wrapSelectorWithSubscription<State, TProps>(
-  selector: Selector<State, TProps>,
-  type: SubscriptionType<TProps>,
-  key: string
-): Selector<State, TProps> {
-  return state => {
-    const result = selector(state)
-    if (_currentCollector) {
-      _currentCollector.collect(type, key)
-    }
-    return result
-  }
-}
-
-export function useSubscribableSelector<State, TProps>(
-  selector: Selector<State, TProps>
-): TProps {
-  const subscriptionManager = useContext(SubscriptionManagerContext)
-  if (!subscriptionManager) {
-    throw new Error(
-      `useSubscribableSelector: Did not find a parent <SubscriptionProvider>. ` +
-        `Did you forget to put it in?`
-    )
-  }
-  const subscriber = useRef<Subscriber | null>(null)
-  if (subscriber.current === null) {
-    subscriber.current = new Subscriber(subscriptionManager)
-  }
-
-  const enhancedSelector = useCallback(
-    state => {
-      const collector = new SubscriptionCollector()
-      collector.beginCollecting()
-      try {
-        return selector(state)
-      } finally {
-        collector.endCollecting()
-        subscriber.current!.handleCollectedSubscriptionIntents(
-          collector.getIntentMap()
-        )
+export function createSelectorEffectContext<T>(
+  defaultContext: T
+): SelectorEffectContext<T> {
+  const Context = createContext<T>(defaultContext)
+  const activeCollector = new SelectorEffectActiveCollector<T>()
+  const createCollector = () => new SelectorEffectCollector(activeCollector)
+  return {
+    Provider: Context.Provider,
+    createCollector,
+    useSelectorEffect(effect) {
+      if (activeCollector.current) {
+        activeCollector.current.collect(effect)
       }
     },
-    [selector]
-  )
-  const result = useSelector(enhancedSelector)
-  useEffect(() => {
-    subscriber.current!.handleMounted()
-    return () => subscriber.current!.handleUnmounted()
-  }, [])
-
-  return result
-}
-
-class Subscriber {
-  currentSubscriptions = new Map<string, Subscription>()
-  nextSubscriptions?: Map<string, SubscriptionIntent>
-  active = false
-  constructor(private manager: SubscriptionManager) {}
-  handleMounted() {
-    this.active = true
-    this.reconcile()
-  }
-  handleUnmounted() {
-    this.active = false
-    this.reconcile()
-  }
-  handleCollectedSubscriptionIntents(
-    intentMap: Map<string, SubscriptionIntent>
-  ) {
-    this.nextSubscriptions = intentMap
-    this.reconcile()
-  }
-  reconcile() {
-    const currentSubscriptions = this.currentSubscriptions
-    const target =
-      (this.active && this.nextSubscriptions) ||
-      new Map<string, SubscriptionIntent>()
-    for (const [key, subscription] of currentSubscriptions) {
-      if (!target.has(key)) {
-        currentSubscriptions.delete(key)
-        subscription.destroy()
+    makeNamedSelectorEffect(name, effect) {
+      return Object.assign(effect, { displayName: name })
+    },
+    makeParameterizedSelectorEffect(name, createEffect) {
+      const effectMap = new Map<string, Effect<T>>()
+      return (...args) => {
+        const key = args.join(',')
+        let effect = effectMap.get(key)
+        if (!effect) {
+          effect = Object.assign(createEffect(...args), {
+            displayName: `${name}(${key})`
+          })
+          effectMap.set(key, effect)
+        }
+        return effect
       }
-    }
-    for (const [key, intent] of target) {
-      if (!currentSubscriptions.has(key)) {
-        const subscription = new Subscription(intent, this.manager)
-        currentSubscriptions.set(key, subscription)
-      }
+    },
+    useMagicSelector(selector) {
+      const [subscriber] = useState(() => new MagicSelectorSubscriber())
+      const enhancedSelector = useCallback(
+        state => {
+          const collector = createCollector()
+          collector.beginCollecting()
+          try {
+            return selector(state)
+          } finally {
+            collector.endCollecting()
+            subscriber.handleEffects(collector.effects)
+          }
+        },
+        [selector, subscriber]
+      )
+      const result = useSelector(enhancedSelector)
+      const context = useContext(Context)
+      useEffect(() => {
+        subscriber.context = context
+      }, [subscriber, context])
+      useEffect(() => {
+        subscriber.handleMounted()
+        return () => subscriber.handleUnmounted()
+      }, [subscriber])
+      return result
     }
   }
 }
 
-class Subscription {
-  static nextId = 1
-  public id: number
+class SelectorEffectActiveCollector<T> {
+  current: SelectorEffectCollector<T> | null = null
+}
+
+export class SelectorEffectCollector<T = unknown> {
+  effects?: Set<Effect<T>>
   constructor(
-    public intent: SubscriptionIntent,
-    private manager: SubscriptionManager
-  ) {
-    this.id = Subscription.nextId++
-    this.manager.addSubscription(this)
+    private readonly activeCollector: SelectorEffectActiveCollector<T>
+  ) {}
+  collect(effect: Effect<T>) {
+    if (!this.effects) this.effects = new Set()
+    this.effects.add(effect)
   }
-  destroy() {
-    this.manager.removeSubscription(this)
+  beginCollecting() {
+    this.activeCollector.current = this
+  }
+  endCollecting() {
+    this.activeCollector.current = null
   }
 }
 
-type ActiveSubscription = {
-  destroy: () => void
-  subscriptions: Set<Subscription>
-}
-
-const noop = () => {}
-
-export class SubscriptionManager<Context = any> {
-  activeSubscriptionMap = new Map<string, ActiveSubscription>()
-  constructor(public context: Context) {}
-  addSubscription(subscription: Subscription) {
-    const mapKey = subscription.intent.toMapKey()
-    let activeSubscription = this.activeSubscriptionMap.get(mapKey)
-    if (!activeSubscription) {
-      activeSubscription = {
-        destroy:
-          subscription.intent.type.effect(
-            subscription.intent.key,
-            this.context
-          ) || noop,
-        subscriptions: new Set()
+class MagicSelectorSubscriber<T> {
+  private mounted = false
+  private activeEffects?: Map<Effect<any>, () => void>
+  private targetEffects?: Set<Effect<any>>
+  public context?: T
+  handleUnmounted() {
+    this.mounted = false
+    this.update()
+  }
+  handleMounted() {
+    this.mounted = true
+    this.update()
+  }
+  handleEffects(effects?: Set<Effect<any>>) {
+    this.targetEffects = effects
+    this.update()
+  }
+  private update() {
+    if (!this.activeEffects && (!this.mounted || !this.targetEffects)) return
+    if (!this.activeEffects) {
+      this.activeEffects = new Map()
+    }
+    const activeEffects = this.activeEffects
+    const targetEffects = this.mounted ? this.targetEffects : undefined
+    if (targetEffects) {
+      for (const effect of targetEffects) {
+        if (!activeEffects.has(effect)) {
+          let unsubscribe = effect(this.context!)
+          if (unsubscribe === undefined) {
+            unsubscribe = noop
+          }
+          if (typeof unsubscribe !== 'function') {
+            throw new Error(
+              `Expect effect ${describeEffect(
+                effect
+              )} to return either nothing or an unsubscribing function; received: ${unsubscribe}`
+            )
+          }
+          activeEffects.set(effect, unsubscribe)
+        }
       }
-      if (activeSubscription.destroy === noop) {
-        console.warn(
-          `The subscription effect function did not return an unsubscribe function. ` +
-            `This can lead to memory leaks.`
-        )
+    }
+    for (const [effect, unsubscribe] of activeEffects) {
+      if (!targetEffects || !targetEffects.has(effect)) {
+        unsubscribe()
+        activeEffects.delete(effect)
       }
-      this.activeSubscriptionMap.set(mapKey, activeSubscription)
-    }
-    activeSubscription.subscriptions.add(subscription)
-  }
-  removeSubscription(subscription: Subscription) {
-    const mapKey = subscription.intent.toMapKey()
-    let activeSubscription = this.activeSubscriptionMap.get(mapKey)
-    if (!activeSubscription) {
-      return
-    }
-    activeSubscription.subscriptions.delete(subscription)
-    if (activeSubscription.subscriptions.size === 0) {
-      this.activeSubscriptionMap.delete(mapKey)
-      activeSubscription.destroy()
     }
   }
 }
 
-type ProviderProps<Context> = {
-  context: any
-  children: ReactNode
-}
-
-export function SubscriptionProvider<Context = any>(
-  props: ProviderProps<Context>
-) {
-  const context = props.context
-  const [manager] = useState(
-    () => new SubscriptionManager<Context>(props.context)
-  )
-  useEffect(() => {
-    manager.context = context
-  }, [context, manager])
-  return (
-    <SubscriptionManagerContext.Provider value={manager}>
-      {props.children}
-    </SubscriptionManagerContext.Provider>
-  )
+function noop() {}
+function describeEffect(effect: Effect<any>) {
+  return (effect as any).displayName || effect.name || '(unknown)'
 }
