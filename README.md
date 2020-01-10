@@ -138,19 +138,3 @@ const ensureUserIsFetched = makeParameterizedSelectorEffect(
 ```
 
 Instead of calling stock `useSelector`, we wrap the `useSelector` API which can keep track of active effects.
-
-```ts
-declare function createSelectorEffectContext<T>(
-  defaultContext: T
-): {
-  Provider: Provider<T>
-  useSelectorEffect: (effect: Effect<T>) => void
-  makeNamedSelectorEffect: (name: string, effect: Effect<T>) => Effect<T>
-  makeParameterizedSelectorEffect: <P extends any[]>(
-    name: string,
-    createEffect: (...args: P) => Effect<T>
-  ) => (...args: P) => Effect<T>
-}
-
-type Effect<T> = (context: T) => undefined | (() => void)
-```
