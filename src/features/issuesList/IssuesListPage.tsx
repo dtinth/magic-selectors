@@ -5,12 +5,13 @@ import { RootState } from 'app/rootReducer'
 import { IssuesPageHeader } from './IssuesPageHeader'
 import { IssuesList } from './IssuesList'
 import { IssuePagination, OnPageChangeCallback } from './IssuePagination'
-
 import {
-  wrapSelectorWithSubscription,
-  useSubscribableSelector as useSelector,
-  SubscriptionType
-} from '../../magic-selectors'
+  makeParameterizedSelectorEffect,
+  addSelectorEffect,
+  useSelector
+} from 'app-core'
+import { fetchIssues } from './issuesSlice'
+import { fetchIssuesCount } from 'features/repoSearch/repoDetailsSlice'
 
 interface ILProps {
   org: string
@@ -20,19 +21,20 @@ interface ILProps {
   showIssueComments: (issueId: number) => void
 }
 
-const Issue = new SubscriptionType('Issue', (key, context) => {
-  console.log('Sub', key, context)
-  return () => {
-    console.log('Unsub', key, context)
+const issueListEffect = makeParameterizedSelectorEffect(
+  'issueListEffect',
+  (org: string, repo: string, page: number) => dispatch => {
+    dispatch(fetchIssues(org, repo, page))
+    dispatch(fetchIssuesCount(org, repo))
+    return () => {}
   }
-})
+)
 
 const selectIssues = (org: string, repo: string, page: number) => {
-  return wrapSelectorWithSubscription(
-    (state: RootState) => state.issues,
-    Issue,
-    `${org}/${repo}/${page}`
-  )
+  return (state: RootState) => {
+    addSelectorEffect(issueListEffect(org, repo, page))
+    return state.issues
+  }
 }
 
 export const IssuesListPage = ({
@@ -57,11 +59,6 @@ export const IssuesListPage = ({
   const issues = currentPageIssues.map(
     issueNumber => issuesByNumber[issueNumber]
   )
-
-  // useEffect(() => {
-  //   dispatch(fetchIssues(org, repo, page))
-  //   dispatch(fetchIssuesCount(org, repo))
-  // }, [org, repo, page, dispatch])
 
   if (issuesError) {
     return (

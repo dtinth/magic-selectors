@@ -1,10 +1,10 @@
-import {
+import React, {
   createContext,
-  Provider,
   useCallback,
   useEffect,
   useState,
-  useContext
+  useContext,
+  useMemo
 } from 'react'
 
 import { Selector, useSelector } from 'react-redux'
@@ -12,9 +12,12 @@ import { Selector, useSelector } from 'react-redux'
 type Effect<T = unknown> = (context: T) => undefined | (() => void)
 
 type SelectorEffectContext<T> = {
-  Provider: Provider<T>
+  SelectorEffectContextProvider: (props: {
+    value: T
+    children: React.ReactNode
+  }) => React.ReactElement
   createCollector: () => SelectorEffectCollector<T>
-  useSelectorEffect: (effect: Effect<T>) => void
+  addSelectorEffect: (effect: Effect<T>) => void
   useMagicSelector: <State, TProps>(selector: Selector<State, TProps>) => TProps
   makeNamedSelectorEffect: (name: string, effect: Effect<T>) => Effect<T>
   makeParameterizedSelectorEffect: <P extends (string | number)[]>(
@@ -23,16 +26,28 @@ type SelectorEffectContext<T> = {
   ) => (...args: P) => Effect<T>
 }
 
-export function createSelectorEffectContext<T>(
-  defaultContext: T
-): SelectorEffectContext<T> {
-  const Context = createContext<T>(defaultContext)
+type SelectorEffectReactContext<T> = { selectorEffectContext: T }
+
+export function createSelectorEffectContext<T>(): SelectorEffectContext<T> {
+  const ReactContext = createContext<SelectorEffectReactContext<T> | null>(null)
   const activeCollector = new SelectorEffectActiveCollector<T>()
   const createCollector = () => new SelectorEffectCollector(activeCollector)
-  return {
-    Provider: Context.Provider,
+  const context: SelectorEffectContext<T> = {
+    SelectorEffectContextProvider: function SelectorEffectContextProvider({
+      value,
+      children
+    }) {
+      const context = useMemo((): SelectorEffectReactContext<T> => {
+        return { selectorEffectContext: value }
+      }, [value])
+      return (
+        <ReactContext.Provider value={context}>
+          {children}
+        </ReactContext.Provider>
+      )
+    },
     createCollector,
-    useSelectorEffect(effect) {
+    addSelectorEffect(effect) {
       if (activeCollector.current) {
         activeCollector.current.collect(effect)
       }
@@ -46,16 +61,23 @@ export function createSelectorEffectContext<T>(
         const key = args.join(',')
         let effect = effectMap.get(key)
         if (!effect) {
-          effect = Object.assign(createEffect(...args), {
-            displayName: `${name}(${key})`
-          })
+          effect = context.makeNamedSelectorEffect(
+            `${name}(${key})`,
+            createEffect(...args)
+          )
           effectMap.set(key, effect)
         }
         return effect
       }
     },
     useMagicSelector(selector) {
-      const [subscriber] = useState(() => new MagicSelectorSubscriber())
+      const reactContext = useContext(ReactContext)
+      if (!reactContext) {
+        throw new Error(
+          `useMagicSelector: Expected a selector effect context to be present. Did you forget to use SelectorEffectContextProvider?`
+        )
+      }
+      const [subscriber] = useState(() => new MagicSelectorSubscriber<T>())
       const enhancedSelector = useCallback(
         state => {
           const collector = createCollector()
@@ -70,17 +92,23 @@ export function createSelectorEffectContext<T>(
         [selector, subscriber]
       )
       const result = useSelector(enhancedSelector)
-      const context = useContext(Context)
       useEffect(() => {
-        subscriber.context = context
-      }, [subscriber, context])
+        subscriber.context = reactContext.selectorEffectContext
+      }, [subscriber, reactContext])
       useEffect(() => {
         subscriber.handleMounted()
-        return () => subscriber.handleUnmounted()
       }, [subscriber])
+      useEffect(() => {
+        subscriber.update()
+      })
+      useEffect(() => () => {
+        subscriber.handleUnmounted()
+        subscriber.update()
+      })
       return result
     }
   }
+  return context
 }
 
 class SelectorEffectActiveCollector<T> {
@@ -111,17 +139,14 @@ class MagicSelectorSubscriber<T> {
   public context?: T
   handleUnmounted() {
     this.mounted = false
-    this.update()
   }
   handleMounted() {
     this.mounted = true
-    this.update()
   }
   handleEffects(effects?: Set<Effect<any>>) {
     this.targetEffects = effects
-    this.update()
   }
-  private update() {
+  update() {
     if (!this.activeEffects && (!this.mounted || !this.targetEffects)) return
     if (!this.activeEffects) {
       this.activeEffects = new Map()

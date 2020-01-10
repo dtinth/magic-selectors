@@ -5,17 +5,17 @@ import { Provider } from 'react-redux'
 import store from './app/store'
 
 import './index.css'
-import { SubscriptionProvider } from 'magic-selectors'
+import { SelectorEffectContextProvider } from 'app-core'
 
 const render = () => {
   const App = require('./app/App').default
 
   ReactDOM.render(
-    <SubscriptionProvider context={{ store }}>
-      <Provider store={store}>
+    <Provider store={store}>
+      <SelectorEffectContextProvider value={store.dispatch}>
         <App />
-      </Provider>
-    </SubscriptionProvider>,
+      </SelectorEffectContextProvider>
+    </Provider>,
     document.getElementById('root')
   )
 }
