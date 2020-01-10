@@ -138,3 +138,76 @@ const ensureUserIsFetched = makeParameterizedSelectorEffect(
 ```
 
 Instead of calling stock `useSelector`, we wrap the `useSelector` API which can keep track of active effects.
+
+## Usage
+
+### Setting up
+
+This setup will be different in different Redux apps.
+This one is based atop Redux Toolkit’s [Advanced Tutorial](https://redux-toolkit.js.org/tutorials/advanced-tutorial).
+
+We first need to create a typed context and export its members, so that it can be used in other modules.
+
+```ts
+// app-core/index.ts
+import { createSelectorEffectContext } from 'magic-selectors'
+import { AppDispatch } from 'app/store'
+
+// ...
+
+export const {
+  SelectorEffectContextProvider,
+  addSelectorEffect,
+  useMagicSelector: useSelector,
+  makeNamedSelectorEffect,
+  makeParameterizedSelectorEffect
+} = createSelectorEffectContext<AppDispatch>()
+```
+
+Then, replace `react-redux`’s useSelector with `magic-selector`’s.
+This new hook will allow selectors to register an effect.
+
+```diff
+-import { useSelector } from 'react-redux'
++import { useSelector } from '../app-core'
+```
+
+Next, provide the selector effect context, so that our `useSelector` can detect it:
+
+```diff
+ ReactDOM.render(
+   <Provider store={store}>
++    <SelectorEffectContextProvider value={store.dispatch}>
+       <App />
++    </SelectorEffectContextProvider>
+   </Provider>,
+   document.getElementById('root')
+ )
+```
+
+### Refactoring code to use effectful selector.
+
+Instead of tying the selection logic to the component, tie it to the selector.
+
+```diff
++const fetchProjectDataEffect = makeParameterizedSelectorEffect(
++  'fetchProjectDataEffect',
++  (projectId: string) => dispatch => {
++    dispatch(fetchProjectDataIfNeeded(projectId))
++  }
++)
+
+ function ProjectPage(props) {
+   const { projectId } = props
+
+-  const dispatch = useDispatch()
+
+-  useEffect(() => {
+-    dispatch(fetchProjectDataIfNeeded(projectId))
+-  }, [projectId, dispatch])
+
+   const projectData = useSelector(selectProjectData(projectId))
+
+   return /* ... */
+ }
+```
