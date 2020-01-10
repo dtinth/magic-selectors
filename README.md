@@ -88,10 +88,12 @@ But what if **hundreds** of components selected the data from the store, assumin
 
 - We could stop using selectors directly and start using React hooks instead.
 
-  - This looks interesting because hooks can also trigger effects, such as loading.
-  - Again, 100+ components must be refactored to use hooks. This is a breaking change.
+  - This looks interesting because hooks can also trigger effects, such as fetching data and subscribing to data source.
+  - It seems that this is a general direction that React community is going for.
+  - We can also benefit from suspense for data fetching along the way.
+  - But again, 100+ components must be refactored to use hooks. This is a breaking change.
   - Some selectors are composed of other selectors. For example, `selectParticipants` might depend on `selectTask` + `selectUser`.
-    That means to properly implement lazy loading, we need to convert all selectors into React hooks.
+    That means to properly implement lazy loading across the app, in addition to 100+ components, we would need to convert all selectors into React hooks as well.
 
 - Add some magic to `useSelector` (and react-redux’s `connect`) to allow selectors to fetch data on component’s behalf.
 
